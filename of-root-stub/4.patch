@@ -1,0 +1,95 @@
+--- a/drivers/of/Kconfig
++++ b/drivers/of/Kconfig
+@@ -112,2 +112,9 @@ config OF_CONFIGFS
+ 
++config OF_ROOT_STUB
++	bool "Device Tree root stub support"
++	select OF_FLATTREE
++	select OF_EARLY_FLATTREE
++	help
++	  Enable support for loading a stub Device Tree root.
++
+ endif # OF
+--- a/drivers/of/Makefile
++++ b/drivers/of/Makefile
+@@ -17,3 +17,5 @@ obj-$(CONFIG_OF_OVERLAY) += overlay.o
+ obj-$(CONFIG_OF_NUMA) += of_numa.o
+ 
+ obj-$(CONFIG_OF_UNITTEST) += unittest-data/
++obj-$(CONFIG_OF_ROOT_STUB) += stub.o
++obj-$(CONFIG_OF_ROOT_STUB) += stub-data/
+--- /dev/null
++++ b/drivers/of/stub-data/Makefile
+@@ -0,0 +1,2 @@
++# SPDX-License-Identifier: GPL-2.0
++obj-y += stub.dtb.o
+--- /dev/null
++++ b/drivers/of/stub-data/stub.dts
+@@ -0,0 +1,9 @@
++// SPDX-License-Identifier: GPL-2.0
++/dts-v1/;
++/plugin/;
++
++/ {
++	aliases {};
++	chosen {};
++	__symbols__ {};
++};
+--- /dev/null
++++ b/drivers/of/stub.c
+@@ -0,0 +1,55 @@
++// SPDX-License-Identifier: GPL-2.0
++/* stub.c: Device Tree stub support.
++ *
++ * Copyright (C) 2019 Digital Loggers, Inc.
++ */
++#include <linux/ctype.h>
++#include <linux/cpu.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/of_fdt.h>
++#include <linux/spinlock.h>
++#include <linux/slab.h>
++#include <linux/proc_fs.h>
++#include <linux/configfs.h>
++#include <linux/types.h>
++#include <linux/stat.h>
++#include <linux/limits.h>
++#include <linux/file.h>
++#include <linux/vmalloc.h>
++#include <linux/firmware.h>
++#include <linux/sizes.h>
++
++#include "of_private.h"
++
++static int of_root_stub_mode = 0;
++
++static int __init of_root_stub(char *str)
++{
++	int stub;
++
++	get_option(&str, &stub);
++	if (stub >= 0 && stub <= 1) {
++		of_root_stub_mode = stub;
++		return 0;
++	}
++	return -1;
++}
++
++early_param("of_root_stub", of_root_stub);
++
++static int __init of_root_stub_init(void)
++{
++	extern uint8_t __dtb_stub_begin[];
++
++	if (of_root_stub_mode && !of_root && !initial_boot_params) {
++		/* TODO: place pointer somewhere? */
++		(void)of_fdt_unflatten_tree((void*)&__dtb_stub_begin[0],
++			NULL,
++			&of_root
++		);
++	}
++
++	return 0;
++}
++early_initcall(of_root_stub_init);

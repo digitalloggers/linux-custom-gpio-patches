@@ -1,0 +1,11 @@
+Kernel patches in of-chip-match, of-gpio-stub, of-root-stub
+subdirectories are Copyright (c) 2019 Digital Loggers, Inc. and
+provided, likewise to the Linux kernel, under:
+
+SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note
+
+See LICENSES/preferred/GPL-2.0, LICENSES/exceptions/Linux-syscall-note for details.
+
+Patches in the rpi-of-configfs directory are maintained by Raspberry
+Pi team, copyright by their respective authors and provided under
+similar terms. The script used to fetch them is in the public domain.

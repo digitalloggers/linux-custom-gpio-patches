@@ -1,0 +1,345 @@
+--- a/drivers/gpio/Kconfig
++++ b/drivers/gpio/Kconfig
+@@ -39,6 +39,15 @@ config OF_GPIO
+ 	depends on OF
+ 	depends on HAS_IOMEM
+ 
++config OF_GPIO_STUB
++	bool "Create DT stubs for GPIO drivers if necessary"
++	depends on OF_GPIO
++	depends on OF_DYNAMIC
++	depends on OF_RESOLVE
++	help
++	  Say Y to create device tree stubs for non-OF GPIO drivers, enabling
++	  their use in DT GPIO consumers.
++
+ config GPIO_ACPI
+ 	def_bool y
+ 	depends on ACPI
+--- a/drivers/gpio/Makefile
++++ b/drivers/gpio/Makefile
+@@ -8,6 +8,7 @@ obj-$(CONFIG_GPIOLIB)		+= gpiolib.o
+ obj-$(CONFIG_GPIOLIB)		+= gpiolib-legacy.o
+ obj-$(CONFIG_GPIOLIB)		+= gpiolib-devprop.o
+ obj-$(CONFIG_OF_GPIO)		+= gpiolib-of.o
++obj-$(CONFIG_OF_GPIO_STUB)	+= gpiolib-of-stub.o
+ obj-$(CONFIG_GPIO_SYSFS)	+= gpiolib-sysfs.o
+ obj-$(CONFIG_GPIO_ACPI)		+= gpiolib-acpi.o
+ 
+--- /dev/null
++++ b/drivers/gpio/gpiolib-of-stub.c
+@@ -0,0 +1,249 @@
++// SPDX-License-Identifier: GPL-2.0
++/* gpiolib-of-stub.c: GPIO Device Tree stub support.
++ *
++ * Copyright (C) 2019 Digital Loggers, Inc.
++ */
++
++#include <linux/device.h>
++#include <linux/err.h>
++#include <linux/errno.h>
++#include <linux/module.h>
++#include <linux/io.h>
++#include <linux/gpio/consumer.h>
++#include <linux/of.h>
++#include <linux/of_address.h>
++#include <linux/of_gpio.h>
++#include <linux/slab.h>
++#include <linux/gpio/machine.h>
++/* XXX: Need of_resolve_phandles() */
++#include "../of/of_private.h"
++
++#include "gpiolib.h"
++
++static int of_gpio_stub_mode = 0;
++
++static int __init of_gpio_stub(char *str)
++{
++	int stub;
++
++	get_option(&str, &stub);
++	if (stub >= 0 && stub <= 1) {
++		of_gpio_stub_mode = stub;
++		return 0;
++	}
++	return -1;
++}
++
++early_param("of_gpio_stub", of_gpio_stub);
++
++static const char gpiochip_stub_symbol_format[] = "gpiochip_stub_%u";
++#define GPIOCHIP_STUB_SYMBOL_MAX_LEN 24
++
++static const char gpiochip_stub_name_format[] = "gpiochip-stub-%u";
++#define GPIOCHIP_STUB_NAME_MAX_LEN 24
++
++static const char gpiochip_stub_base_format[] = "%u";
++#define GPIOCHIP_STUB_BASE_MAX_LEN 10
++
++static const char gpiochip_stub_path_format[] = "/gpiochip-stub-%u";
++#define GPIOCHIP_STUB_PATH_MAX_LEN 25
++
++static void of_gpiochip_make_stub_symbols_changeset(struct gpio_chip *chip)
++{
++	struct device_node *symbols;
++	struct property *prop;
++	int len;
++
++	symbols = of_find_node_by_path("/__symbols__");
++
++	if (symbols) {
++		prop = kzalloc(sizeof(*prop), GFP_KERNEL);
++
++		if (!prop)
++			goto out_err;
++
++		prop->name= kzalloc(GPIOCHIP_STUB_SYMBOL_MAX_LEN+1, GFP_KERNEL);
++		if (!prop->name)
++			goto out_err;
++
++		len = snprintf(prop->name, GPIOCHIP_STUB_SYMBOL_MAX_LEN+1, gpiochip_stub_symbol_format, chip->base);
++		if (len >= GPIOCHIP_STUB_SYMBOL_MAX_LEN+1)
++			goto out_err;
++
++		prop->value= kzalloc(GPIOCHIP_STUB_PATH_MAX_LEN+1, GFP_KERNEL);
++		if (!prop->value)
++			goto out_err;
++
++		len = snprintf(prop->value, GPIOCHIP_STUB_PATH_MAX_LEN+1, gpiochip_stub_path_format, chip->base);
++		if (len >= GPIOCHIP_STUB_PATH_MAX_LEN+1)
++			goto out_err;
++
++		prop->length = strlen(prop->value)+1;
++
++		if (of_changeset_add_property(&chip->of_stub_symbols_changeset, symbols, prop))
++			goto out_err;
++	}
++	return;
++
++out_err:
++	if (prop) {
++		kfree(prop->name);
++		kfree(prop->value);
++		kfree(prop);
++	}
++}
++
++static struct device_node * of_gpiochip_make_stub(struct gpio_chip *chip)
++{
++	struct device_node *np;
++	struct property *prop;
++	char* buf;
++	int len;
++
++	np = kzalloc(sizeof(*np), GFP_KERNEL);
++	if (!np)
++		goto out_err;
++
++	of_node_set_flag(np, OF_DETACHED);
++
++	np->parent = of_node_get(of_root);
++	if (IS_ERR(np->parent))
++		goto out_err;
++
++	np->full_name = buf = kzalloc(GPIOCHIP_STUB_NAME_MAX_LEN+1, GFP_KERNEL);
++	if (!np->full_name)
++		goto out_err;
++
++	len = snprintf(buf, GPIOCHIP_STUB_NAME_MAX_LEN+1, gpiochip_stub_name_format, chip->base);
++	if (len >= GPIOCHIP_STUB_NAME_MAX_LEN+1)
++		goto out_err;
++
++	of_node_init(np);
++
++	of_node_set_flag(np, OF_DYNAMIC);
++
++	np->phandle = 1;
++
++	prop = kzalloc(sizeof(*prop), GFP_KERNEL);
++
++	if (!prop)
++		goto out_err;
++
++	prop->next = np->properties;
++	np->properties = prop;
++
++	prop->name= kstrdup("phandle", GFP_KERNEL);
++	if (!prop->name)
++		goto out_err;
++
++	prop->value= kzalloc(sizeof(__be32), GFP_KERNEL);
++	if (!prop->value)
++		goto out_err;
++
++	*(__be32 *)prop->value = cpu_to_be32(np->phandle);
++
++	prop->length = sizeof(__be32);
++
++	prop = kzalloc(sizeof(*prop), GFP_KERNEL);
++
++	if (!prop)
++		goto out_err;
++
++	prop->next = np->properties;
++	np->properties = prop;
++
++	prop->name= kstrdup("#gpio-cells", GFP_KERNEL);
++	if (!prop->name)
++		goto out_err;
++
++	prop->value= kzalloc(sizeof(__be32), GFP_KERNEL);
++	if (!prop->value)
++		goto out_err;
++
++	*(__be32 *)prop->value = cpu_to_be32(2);
++
++	prop->length = sizeof(__be32);
++
++	prop = kzalloc(sizeof(*prop), GFP_KERNEL);
++
++	if (!prop)
++		goto out_err;
++
++	prop->next = np->properties;
++	np->properties = prop;
++
++	prop->name= kstrdup("gpiochip-stub,base", GFP_KERNEL);
++	if (!prop->name)
++		goto out_err;
++
++	prop->value= kzalloc(GPIOCHIP_STUB_BASE_MAX_LEN, GFP_KERNEL);
++	if (!prop->value)
++		goto out_err;
++
++	len = snprintf(prop->value, GPIOCHIP_STUB_BASE_MAX_LEN+1, gpiochip_stub_base_format, chip->base);
++	if (len >= GPIOCHIP_STUB_BASE_MAX_LEN+1)
++		goto out_err;
++
++	prop->length = len;
++
++	prop = kzalloc(sizeof(*prop), GFP_KERNEL);
++
++	if (!prop)
++		goto out_err;
++
++	prop->next = np->properties;
++	np->properties = prop;
++
++	prop->name= kstrdup("gpiochip-stub,label", GFP_KERNEL);
++	if (!prop->name)
++		goto out_err;
++
++	prop->value = kstrdup(chip->label, GFP_KERNEL);
++	if (!prop->value)
++		goto out_err;
++
++	prop->length = strlen(prop->value)+1;
++
++	if (of_resolve_phandles(np)) {
++		goto out_err;
++	}
++
++	if (of_attach_node(np)) {
++		goto out_err;
++	}
++
++	of_gpiochip_make_stub_symbols_changeset(chip);
++
++	of_node_put(np->parent);
++
++	return np;
++out_err:
++	if (np) {
++		while ((prop = np->properties)) {
++			np->properties = prop->next;
++			kfree(prop->name);
++			kfree(prop->value);
++			kfree(prop);
++		}
++		of_node_put(np->parent);
++		kfree(np->full_name);
++		kfree(np);
++	}
++	return NULL;
++}
++
++int of_gpiochip_stub_add(struct gpio_chip *chip)
++{
++	of_changeset_init(&chip->of_stub_symbols_changeset);
++
++	if (of_gpio_stub_mode && of_root && !(chip->of_node || (chip->parent && chip->parent->of_node)))
++		chip->of_node = of_gpiochip_make_stub(chip);
++
++	return of_changeset_apply(&chip->of_stub_symbols_changeset);
++}
++
++void of_gpiochip_stub_remove(struct gpio_chip *chip)
++{
++	of_changeset_revert(&chip->of_stub_symbols_changeset);
++	of_changeset_destroy(&chip->of_stub_symbols_changeset);
++}
+--- a/drivers/gpio/gpiolib.c
++++ b/drivers/gpio/gpiolib.c
+@@ -1381,6 +1381,10 @@
+ 	if (status)
+ 		goto err_free_gpiochip_mask;
+ 
++	status = of_gpiochip_stub_add(chip);
++	if (status)
++		goto err_remove_chip;
++
+ 	status = of_gpiochip_add(chip);
+ 	if (status)
+ 		goto err_remove_chip;
+@@ -1424,6 +1428,7 @@
+ err_remove_of_chip:
+ 	gpiochip_free_hogs(chip);
+ 	of_gpiochip_remove(chip);
++	of_gpiochip_stub_remove(chip);
+ err_remove_chip:
+ 	gpiochip_irqchip_remove(chip);
+ err_free_gpiochip_mask:
+@@ -1486,6 +1491,7 @@
+ 	acpi_gpiochip_remove(chip);
+ 	gpiochip_remove_pin_ranges(chip);
+ 	of_gpiochip_remove(chip);
++	of_gpiochip_stub_remove(chip);
+ 	gpiochip_free_valid_mask(chip);
+ 	/*
+ 	 * We accept no more calls into the driver from this point, so
+--- a/drivers/gpio/gpiolib.h
++++ b/drivers/gpio/gpiolib.h
+@@ -120,6 +120,14 @@ static inline int of_gpiochip_add(struct gpio_chip *gc) { return 0; }
+ static inline void of_gpiochip_remove(struct gpio_chip *gc) { }
+ #endif /* CONFIG_OF_GPIO */
+ 
++#ifdef CONFIG_OF_GPIO_STUB
++int of_gpiochip_stub_add(struct gpio_chip *gc);
++void of_gpiochip_stub_remove(struct gpio_chip *gc);
++#else
++static inline int of_gpiochip_stub_add(struct gpio_chip *gc) { return 0; }
++static inline void of_gpiochip_stub_remove(struct gpio_chip *gc) { }
++#endif
++
+ #ifdef CONFIG_ACPI
+ void acpi_gpiochip_add(struct gpio_chip *chip);
+ void acpi_gpiochip_remove(struct gpio_chip *chip);
+--- a/include/linux/gpio/driver.h
++++ b/include/linux/gpio/driver.h
+@@ -331,6 +331,16 @@ struct gpio_chip {
+ 	 */
+ 	int (*of_xlate)(struct gpio_chip *gc,
+ 			const struct of_phandle_args *gpiospec, u32 *flags);
++
++#ifdef CONFIG_OF_GPIO_STUB
++	/**
++	 * @of_stub_symbols_changeset:
++	 *
++	 * Symbol changes introduced by creating the stub, if any.
++	 */
++	struct of_changeset of_stub_symbols_changeset;
++#endif
++
+ #endif
+ };
+ 
